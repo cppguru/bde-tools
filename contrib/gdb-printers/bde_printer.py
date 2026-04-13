@@ -364,6 +364,100 @@ class BslVectorImp:
         return ValueIterator(VectorContentsIterator(self.begin, self.end))
 
 
+class BslDequeImp:
+    """Printer for 'bsl::Deque_Base<T>' specializations.
+
+    This pretty printer handles printing instances of the
+    'bsl::Deque_Base<>' template used to hold the contents of
+    'bsl::deque<>'.  The printer will dump the size, number of used blocks,
+    and the total number of blocks of the object
+    object and have children showing the elements.
+
+        [size:100,blocks:7,blocks_capacity:10]
+
+    Note: This is not intended for direct use
+    """
+
+    def __init__(self, val):
+        self.val = val
+        self.start_block = val["d_start"]["d_blockPtr_p"]
+        self.start_val = val["d_start"]["d_value_p"]
+        self.end_block = val["d_finish"]["d_blockPtr_p"]
+        self.end_val = val["d_finish"]["d_value_p"]
+        self.blocks = int(self.end_block - self.start_block) + 1
+        self.block_capacity = int(val["d_blocksLength"])
+
+        # See bsl::Deque_BlockLengthCalcUtil<T> in bslstl_deque.h
+        default_block_size = 200
+        type_size = self.start_val.type.target().sizeof
+        self.block_size = max(16 * type_size, default_block_size) // type_size
+
+        if self.blocks == 1:
+            # Start and end are on the same block
+            # [   <start>------<end>   ]
+            self.size = int(self.end_val - self.start_val)
+        else:
+            # Start and end on are on different blocks
+            # [   <start>---] [------] [---<end>   ]
+            start_block_start = self._block_start_val(self.start_block)
+            start_block_size = self.block_size - int(self.start_val - start_block_start)
+            end_block_start = self._block_start_val(self.end_block)
+            end_block_size = int(self.end_val - end_block_start)
+            num_full_blocks = self.blocks - 2
+            self.size = (
+                start_block_size + num_full_blocks * self.block_size + end_block_size
+            )
+
+    def to_string(self):
+        return (
+            f"["
+            f"size:{self.size},"
+            f"blocks:{self.blocks},"
+            f"block_capacity:{self.block_capacity}"
+            f"]"
+        )
+
+    def display_hint(self):
+        return "deque"
+
+    def children(self):
+        class DequeContentsIterator:
+            """Iterator over the contents of the deque"""
+
+            def __init__(s, start_block, start_val, end_block, end_val):
+                s.end_block = end_block
+                s.end_val = end_val
+                s.current_block = start_block
+                s.current_block_start = self._block_start_val(s.current_block)
+                s.current_val = start_val
+
+            def __iter__(s):
+                return s
+
+            def __next__(s):
+                if s.current_block == s.end_block and s.current_val == s.end_val:
+                    raise StopIteration
+
+                value = s.current_val.dereference()
+                s.current_val += 1
+                if int(s.current_val - s.current_block_start) == self.block_size:
+                    s.current_block += 1
+                    s.current_block_start = self._block_start_val(s.current_block)
+                    s.current_val = s.current_block_start
+                return value
+
+            next = __next__
+
+        return ValueIterator(
+            DequeContentsIterator(
+                self.start_block, self.start_val, self.end_block, self.end_val
+            )
+        )
+
+    def _block_start_val(self, block_ptr):
+        return block_ptr.dereference()["d_data"][0].address
+
+
 def getNodeValue(node, type):
     # clang optimizes out TreeNode and BidirectionalNode even in debug builds.
     # Try to work around it by raw memory access.
@@ -1031,6 +1125,56 @@ class BslVector:
 
         vimp = val.cast(getBaseType(val, 0))
         self.vimp = BslVectorImp(vimp)
+        self.members["data"] = vimp
+
+        self.alloc = _allocatorResource(val["d_allocator"])
+        self.members.update(_allocatorDict(self.alloc))
+
+    def to_string(self):
+        return f"{simplifyTypeName(self.val.type)} {self.vimp.to_string()}"
+
+    def children(self):
+        if "alloc" in self.members:
+            return iter(self.members.items())
+        else:
+            return self.vimp.children()
+
+
+class BslDeque:
+    """Printer for 'bsl::deque<T,bsl::allocator<T>>'
+
+    The pretty printer for specializations of 'bsl::deque<>' is implemented
+    in terms of the 'DequeImp' pretty printer.  When allocator printing is
+    disabled, elements are direct children of the deque:
+
+        deque = bsl::deque<int> [size:3,blocks:1,block_capacity:5] {
+            [0] = 1
+            [1] = 2
+            [2] = 3
+        }
+
+    When allocator printing is enabled, the deque will have a child 'data'
+    that holds the 'bsl::Deque_Base<T>' implementation, and the elements will
+    be children of the 'data' child:
+
+        deque = bsl::deque<int> [size:3,blocks:1,block_capacity:5] {
+            data = [size:3,blocks:1,block_capacity:5] {
+                [0] = 1
+                [1] = 2
+                [2] = 3
+            }
+            alloc = 0x4e3ce0 <BloombergLP::g_newDeleteAllocatorSingleton>
+        }
+
+    See also 'BslDequeImp'
+    """
+
+    def __init__(self, val):
+        self.val = val
+        self.members = {}
+
+        vimp = val.cast(getBaseType(val, 0))
+        self.vimp = BslDequeImp(vimp)
         self.members["data"] = vimp
 
         self.alloc = _allocatorResource(val["d_allocator"])
@@ -2034,6 +2178,9 @@ def build_pretty_printer():
 
     add_printer("(internal)VectorImp", "^bsl::vectorBase<.*>", BslVectorImp)
     add_printer("vector", "^bsl::vector<.*>$", BslVector)
+
+    add_printer("(internal)DequeImp", "^bsl::Deque_Base<.*>", BslDequeImp)
+    add_printer("deque", "^bsl::deque<.*>$", BslDeque)
 
     add_printer("map", "^bsl::map<.*>$", BslMap)
     add_printer("set", "^bsl::set<.*>$", BslSet)

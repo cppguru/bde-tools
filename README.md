@@ -59,3 +59,4 @@ see the LICENSE file at the top of the source tree for more information.
 
 If you have questions, comments, suggestions for improvement or any other
 inquiries regarding BDE Tools, feel free to open a ticket to BDE team.
+
